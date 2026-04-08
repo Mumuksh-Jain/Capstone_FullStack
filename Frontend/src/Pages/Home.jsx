@@ -310,14 +310,12 @@ export default function Home() {
                 </span>
               </div>
               {project.description && (
-                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
-                  {project.description.length > 120
-                    ? project.description.substring(0, 120) + '...'
-                    : project.description}
+                <p className="project-description">
+                  {project.description}
                 </p>
               )}
               
-              <div style={{ marginTop: 'auto', paddingTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ paddingTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 {project.tech_stack?.length > 0 && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', minWidth: '45px' }}>Skills</span>
@@ -496,11 +494,11 @@ export default function Home() {
                   <span className="project-author">by {hackathon.organizer}</span>
                 </div>
 
-                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+                <p className="project-description">
                   {hackathon.description}
                 </p>
 
-                <div style={{ marginTop: 'auto', paddingTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ paddingTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', minWidth: '45px' }}>
                       Tracks
