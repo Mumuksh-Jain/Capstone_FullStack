@@ -41,6 +41,8 @@ STRICT RULES:
 - Output MUST be valid JSON
 - No markdown or explanation
 
+- For techStack and rolesNeeded, provide ONLY the concise names (e.g., "React", "Node.js"). Do NOT include any descriptions of what they are used for.
+
 FORMAT:
 {
   "title": "string",

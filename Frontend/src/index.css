@@ -695,9 +695,9 @@ a:hover { opacity: 0.72; }
   background: var(--bg-card);
   border: 1.5px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 26px;
+  padding: 16px 20px;
   transition: all 0.22s ease;
-  display: flex; flex-direction: column; gap: 12px;
+  display: flex; flex-direction: column; gap: 8px;
   position: relative;
   box-shadow: var(--shadow-sm);
 }
@@ -721,6 +721,18 @@ a:hover { opacity: 0.72; }
 .project-author {
   font-size: 0.75rem;
   color: var(--text-muted);
+}
+.project-description {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .project-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 
