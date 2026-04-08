@@ -16,6 +16,13 @@ const aiRoutes=require("./routes/ai.route")
 app.use("/api/ai",aiRoutes)
 const notificationRoutes=require("./routes/notification.route")
 app.use("/api/notifications",notificationRoutes)
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "OK",
+    uptime: process.uptime(),
+    timestamp: Date.now()
+  });
+});
 app.use((err,req,res,next)=>{
     const statusCode=err.statusCode || 500
     const message=err.message || "Internal Server Error"
