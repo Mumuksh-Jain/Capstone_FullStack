@@ -28,7 +28,7 @@ export default function Footer() {
         </div>
         <div className="footer-bottom">
           <span>© {new Date().getFullYear()} CollabHub. All rights reserved.</span>
-          <span className="footer-built">Created by Mumukshu Jain</span>
+          <span className="footer-built">Created by Mumukshu Jain and Kartik Ahuja</span>
         </div>
       </div>
     </footer>
