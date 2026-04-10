@@ -326,9 +326,13 @@ const setupTodoSocket = (server) => {
     const io = new Server(server, {
         path: "/ws/todo",
         cors: {
-            origin: process.env.CORS_ORIGIN
-                ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
-                : ["http://localhost:5173", "http://127.0.0.1:5173"],
+            origin: [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                ...(process.env.CORS_ORIGIN
+                    ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
+                    : [])
+            ],
             credentials: true
         }
     })
