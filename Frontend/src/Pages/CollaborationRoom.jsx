@@ -132,7 +132,10 @@ export default function CollaborationRoom() {
   const sendWs = (payload) => {
     const socket = wsRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
+      console.log("Sending WebSocket message:", payload.type, payload);
       socket.send(JSON.stringify(payload));
+    } else {
+      console.warn("WebSocket not ready. Socket state:", socket?.readyState, "Expected:", WebSocket.OPEN);
     }
   };
 
@@ -271,13 +274,24 @@ export default function CollaborationRoom() {
   };
 
   const ensureLocalMedia = async () => {
-    if (localStreamRef.current) return localStreamRef.current;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    localStreamRef.current = stream;
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
+    if (localStreamRef.current) {
+      console.log("Local media already available");
+      return localStreamRef.current;
     }
-    return stream;
+    try {
+      console.log("Requesting user media...");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      localStreamRef.current = stream;
+      console.log("Local media acquired:", stream.id);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(e => console.error("Error playing local video:", e));
+      }
+      return stream;
+    } catch (error) {
+      console.error("Failed to get user media:", error);
+      throw new Error(`Camera/microphone access denied: ${error.message}`);
+    }
   };
 
   const syncLocalTracks = () => {
@@ -293,55 +307,86 @@ export default function CollaborationRoom() {
 
   const getOrCreatePeerConnection = async (targetUserId) => {
     let pc = peerConnectionsRef.current.get(targetUserId);
-    if (pc) return pc;
+    if (pc) {
+      console.log("Reusing existing peer connection for user:", targetUserId);
+      return pc;
+    }
 
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const stream = await ensureLocalMedia();
-    stream.getTracks().forEach((track) => {
-      pc.addTrack(track, stream);
-    });
-
-    pc.onicecandidate = (event) => {
-      if (!event.candidate) return;
-      sendWs({
-        type: "call:ice-candidate",
-        roomId: id,
-        targetUserId,
-        candidate: event.candidate,
+    try {
+      console.log("Creating new peer connection for user:", targetUserId);
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const stream = await ensureLocalMedia();
+      
+      console.log("Adding", stream.getTracks().length, "tracks to peer connection");
+      stream.getTracks().forEach((track) => {
+        pc.addTrack(track, stream);
       });
-    };
 
-    pc.ontrack = (event) => {
-      const streamTrack = event.streams?.[0] || new MediaStream([event.track]);
-      if (!streamTrack) return;
-      setRemoteStreams((prev) => {
-        const next = prev.filter((entry) => String(entry.userId) !== String(targetUserId));
-        next.push({ userId: targetUserId, stream: streamTrack });
-        return next;
-      });
-    };
+      pc.onicecandidate = (event) => {
+        if (!event.candidate) return;
+        try {
+          sendWs({
+            type: "call:ice-candidate",
+            roomId: id,
+            targetUserId,
+            candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
+          });
+        } catch (error) {
+          console.error("Error sending ICE candidate:", error);
+        }
+      };
 
-    pc.onconnectionstatechange = () => {
-      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
-        cleanupPeerConnection(targetUserId);
-      }
-    };
+      pc.ontrack = (event) => {
+        console.log("Remote track received from user:", targetUserId, event);
+        const streamTrack = event.streams?.[0] || new MediaStream([event.track]);
+        if (!streamTrack) {
+          console.warn("No stream available for remote track");
+          return;
+        }
+        console.log("Adding remote stream:", streamTrack.id);
+        setRemoteStreams((prev) => {
+          const next = prev.filter((entry) => String(entry.userId) !== String(targetUserId));
+          next.push({ userId: targetUserId, stream: streamTrack });
+          console.log("Remote streams updated:", next);
+          return next;
+        });
+      };
 
-    peerConnectionsRef.current.set(targetUserId, pc);
-    return pc;
+      pc.onconnectionstatechange = () => {
+        console.log("Connection state changed for user", targetUserId, ":", pc.connectionState);
+        if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+          console.log("Cleaning up peer connection for user:", targetUserId);
+          cleanupPeerConnection(targetUserId);
+        }
+      };
+
+      peerConnectionsRef.current.set(targetUserId, pc);
+      console.log("Peer connection created and stored for user:", targetUserId);
+      return pc;
+    } catch (error) {
+      console.error("Error creating peer connection:", error);
+      throw error;
+    }
   };
 
   const createOfferForUser = async (targetUserId) => {
     if (!targetUserId || String(targetUserId) === String(user?._id)) return;
-    const pc = await getOrCreatePeerConnection(targetUserId);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    sendWs({
-      type: "call:offer",
-      roomId: id,
-      targetUserId,
-      sdp: pc.localDescription,
-    });
+    try {
+      console.log("Creating offer for user:", targetUserId);
+      const pc = await getOrCreatePeerConnection(targetUserId);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      console.log("Offer created and local description set for user:", targetUserId);
+      sendWs({
+        type: "call:offer",
+        roomId: id,
+        targetUserId,
+        sdp: pc.localDescription,
+      });
+    } catch (error) {
+      console.error("Error creating offer for user", targetUserId, ":", error);
+      appendSystemMessage(`Failed to establish connection with participant. ${error.message}`);
+    }
   };
 
   const leaveCall = (reason = "manual") => {
@@ -357,11 +402,14 @@ export default function CollaborationRoom() {
 
   const startCall = async () => {
     try {
+      console.log("Starting call...");
       await ensureLocalMedia();
       syncLocalTracks();
+      console.log("Sending call:join event");
       sendWs({ type: "call:join", roomId: id, callType: "video" });
     } catch (error) {
-      appendSystemMessage("Camera or microphone permission denied.");
+      console.error("Error starting call:", error);
+      appendSystemMessage("Camera or microphone permission denied. " + error.message);
     }
   };
 
@@ -441,33 +489,59 @@ export default function CollaborationRoom() {
     }
 
     if (data.type === "call:offer") {
-      const fromUserId = data.fromUserId;
-      const pc = await getOrCreatePeerConnection(fromUserId);
-      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      sendWs({
-        type: "call:answer",
-        roomId: id,
-        targetUserId: fromUserId,
-        sdp: pc.localDescription,
-      });
+      try {
+        console.log("Received offer from user:", data.fromUserId);
+        const fromUserId = data.fromUserId;
+        const pc = await getOrCreatePeerConnection(fromUserId);
+        console.log("Setting remote description for offer from:", fromUserId);
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        console.log("Answer created for user:", fromUserId);
+        sendWs({
+          type: "call:answer",
+          roomId: id,
+          targetUserId: fromUserId,
+          sdp: pc.localDescription,
+        });
+      } catch (error) {
+        console.error("Error handling call offer:", error);
+        appendSystemMessage("Failed to process call offer: " + error.message);
+      }
       return;
     }
 
     if (data.type === "call:answer") {
-      const fromUserId = data.fromUserId;
-      const pc = peerConnectionsRef.current.get(fromUserId);
-      if (!pc) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      try {
+        console.log("Received answer from user:", data.fromUserId);
+        const fromUserId = data.fromUserId;
+        const pc = peerConnectionsRef.current.get(fromUserId);
+        if (!pc) {
+          console.warn("No peer connection found for user:", fromUserId);
+          return;
+        }
+        console.log("Setting remote description for answer from:", fromUserId);
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        console.log("Remote description set for user:", fromUserId);
+      } catch (error) {
+        console.error("Error handling call answer:", error);
+        appendSystemMessage("Failed to process call answer: " + error.message);
+      }
       return;
     }
 
     if (data.type === "call:ice-candidate") {
-      const fromUserId = data.fromUserId;
-      const pc = await getOrCreatePeerConnection(fromUserId);
-      if (data.candidate) {
-        await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+      try {
+        console.log("Received ICE candidate from user:", data.fromUserId);
+        const fromUserId = data.fromUserId;
+        const pc = await getOrCreatePeerConnection(fromUserId);
+        if (data.candidate) {
+          const iceCandidate = new RTCIceCandidate(data.candidate);
+          await pc.addIceCandidate(iceCandidate);
+          console.log("ICE candidate added for user:", fromUserId);
+        }
+      } catch (error) {
+        console.error("Error handling ICE candidate:", error);
       }
       return;
     }
@@ -588,16 +662,22 @@ export default function CollaborationRoom() {
   }, [isMuted, cameraOff, inCall, id]);
 
   useEffect(() => {
+    console.log("Updating remote video sources. Remote streams:", remoteStreams.length, "Remote primary:", remotePrimary?.userId);
+    
     if (remotePrimaryRef.current) {
-      remotePrimaryRef.current.srcObject = remotePrimary?.stream || null;
-      if (remotePrimaryRef.current.srcObject) {
-        remotePrimaryRef.current.play().catch(() => {});
+      const stream = remotePrimary?.stream;
+      remotePrimaryRef.current.srcObject = stream || null;
+      if (stream && stream.getTracks().length > 0) {
+        remotePrimaryRef.current.play().catch((e) => console.error("Error playing remote video:", e));
+        console.log("Remote primary video playing:", stream.id);
       }
     }
-    if (drawRemoteVideoRef.current) {
-      drawRemoteVideoRef.current.srcObject = remotePrimary?.stream || null;
-      if (drawRemoteVideoRef.current.srcObject) {
-        drawRemoteVideoRef.current.play().catch(() => {});
+    if (drawRemoteVideoRef.current && drawOpen) {
+      const stream = remotePrimary?.stream;
+      drawRemoteVideoRef.current.srcObject = stream || null;
+      if (stream && stream.getTracks().length > 0) {
+        drawRemoteVideoRef.current.play().catch((e) => console.error("Error playing draw remote video:", e));
+        console.log("Draw remote video playing:", stream.id);
       }
     }
   }, [remotePrimary, drawOpen, inCall]);
