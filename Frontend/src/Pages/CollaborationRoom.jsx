@@ -6,26 +6,30 @@ import { io } from "socket.io-client";
 const WS_BASE = import.meta.env.VITE_WS_URL || "ws://localhost:3000/ws/chat";
 const TODO_WS_BASE = import.meta.env.VITE_TODO_WS_URL || "http://localhost:3000";
 
-// Build ICE servers list — STUN always included, TURN only if env vars are set
-const buildIceServers = () => {
-  const servers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    { urls: "stun:stun4.l.google.com:19302" },
-  ];
-  const turnUrl = import.meta.env.VITE_TURN_URL;
-  const turnUser = import.meta.env.VITE_TURN_USERNAME;
-  const turnCred = import.meta.env.VITE_TURN_CREDENTIAL;
-  if (turnUrl && turnUser && turnCred) {
-    // Support comma-separated TURN URLs
-    const urls = turnUrl.split(",").map((u) => u.trim()).filter(Boolean);
-    servers.push({ urls, username: turnUser, credential: turnCred });
-  }
-  return servers;
-};
-const ICE_SERVERS = buildIceServers();
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun.relay.metered.ca:80" },
+  {
+    urls: "turn:global.relay.metered.ca:80",
+    username: "7e8a8be4accc58b4f3e96f7d",
+    credential: "e354deaeb710675bd6e8414ba3bf749555a3",
+  },
+  {
+    urls: "turn:global.relay.metered.ca:80?transport=tcp",
+    username: "7e8a8be4accc58b4f3e96f7d",
+    credential: "e354deaeb710675bd6e8414ba3bf749555a3",
+  },
+  {
+    urls: "turn:global.relay.metered.ca:443",
+    username: "7e8a8be4accc58b4f3e96f7d",
+    credential: "e354deaeb710675bd6e8414ba3bf749555a3",
+  },
+  {
+    urls: "turns:global.relay.metered.ca:443?transport=tcp",
+    username: "7e8a8be4accc58b4f3e96f7d",
+    credential: "e354deaeb710675bd6e8414ba3bf749555a3",
+  },
+];
 const BACKEND_TOKEN_KEY = "collabhub_backend_access_token";
 
 const formatTime = (value) => {
