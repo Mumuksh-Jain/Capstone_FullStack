@@ -143,10 +143,12 @@ const removeParticipantFromCall = async (ws, reason) => {
     const participant = session.participants.get(ws.user.id)
     if (!participant) return
 
+    // Record leave time and remove participant FIRST
     participant.leftAt = new Date()
-    session.participants.set(ws.user.id, participant)
+    session.participants.delete(ws.user.id)
 
-    broadcastToRoom(roomId, {
+    // Notify remaining participants that this user left
+    broadcastToRoomExceptUser(roomId, ws.user.id, {
         type: "call:participant_left",
         roomId,
         userId: ws.user.id,
@@ -154,7 +156,8 @@ const removeParticipantFromCall = async (ws, reason) => {
         reason
     })
 
-    if (session.participants.size <= 1) {
+    if (session.participants.size === 0) {
+        // No one left — persist and clean up
         await persistEndedCallSession(session, "all_left")
         activeCalls.delete(roomId)
         broadcastToRoom(roomId, {
@@ -165,7 +168,6 @@ const removeParticipantFromCall = async (ws, reason) => {
         return
     }
 
-    session.participants.delete(ws.user.id)
     activeCalls.set(roomId, session)
 }
 

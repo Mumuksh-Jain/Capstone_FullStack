@@ -5,26 +5,27 @@ import { io } from "socket.io-client";
 
 const WS_BASE = import.meta.env.VITE_WS_URL || "ws://localhost:3000/ws/chat";
 const TODO_WS_BASE = import.meta.env.VITE_TODO_WS_URL || "http://localhost:3000";
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  {
-    urls: "turn:openrelay.metered.ca:80",
-    username: "openrelayproject",
-    credential: "openrelayproject",
-  },
-  {
-    urls: "turn:openrelay.metered.ca:443",
-    username: "openrelayproject",
-    credential: "openrelayproject",
-  },
-  {
-    urls: "turn:openrelay.metered.ca:443?transport=tcp",
-    username: "openrelayproject",
-    credential: "openrelayproject",
-  },
-];
+
+// Build ICE servers list — STUN always included, TURN only if env vars are set
+const buildIceServers = () => {
+  const servers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" },
+    { urls: "stun:stun4.l.google.com:19302" },
+  ];
+  const turnUrl = import.meta.env.VITE_TURN_URL;
+  const turnUser = import.meta.env.VITE_TURN_USERNAME;
+  const turnCred = import.meta.env.VITE_TURN_CREDENTIAL;
+  if (turnUrl && turnUser && turnCred) {
+    // Support comma-separated TURN URLs
+    const urls = turnUrl.split(",").map((u) => u.trim()).filter(Boolean);
+    servers.push({ urls, username: turnUser, credential: turnCred });
+  }
+  return servers;
+};
+const ICE_SERVERS = buildIceServers();
 const BACKEND_TOKEN_KEY = "collabhub_backend_access_token";
 
 const formatTime = (value) => {
@@ -503,14 +504,11 @@ export default function CollaborationRoom() {
       const participants = data.participants || [];
       setCallParticipants(participants);
       knownParticipantsRef.current = new Map(participants.map((p) => [String(p.userId), p]));
-
-      // Send offers to ALL existing participants in the call (except self)
-      for (const p of participants) {
-        if (String(p.userId) !== String(user?._id)) {
-          console.log("Sending offer to existing participant:", p.userId);
-          createOfferForUser(p.userId);
-        }
-      }
+      // Do NOT create offers here — let the existing participant create
+      // offers via the call:participant_joined event. This avoids glare
+      // (both sides sending offers simultaneously), which was the root
+      // cause of the black-screen / failed negotiation.
+      console.log("Joined call. Waiting for offers from existing participants. Participants:", participants.length);
       return;
     }
 
@@ -525,7 +523,13 @@ export default function CollaborationRoom() {
       setCallParticipants(Array.from(knownParticipantsRef.current.values()));
 
       if (joinedCallRef.current) {
-        await createOfferForUser(data.userId);
+        // Small delay to let the new participant finish setting up their media
+        // before we send the offer. Without this, the offer can arrive before
+        // the joiner is ready, leading to a missed/failed negotiation.
+        console.log("New participant joined:", data.userId, "— creating offer in 500ms");
+        setTimeout(() => {
+          createOfferForUser(data.userId);
+        }, 500);
       }
       return;
     }
@@ -555,27 +559,26 @@ export default function CollaborationRoom() {
         console.log("Received offer from user:", data.fromUserId);
         const fromUserId = data.fromUserId;
 
-        // If we already have a PC with a remote description set,
-        // tear it down to handle the new offer cleanly (renegotiation)
+        // If there's an existing PC in a bad state, clean it up first
         const existingPc = peerConnectionsRef.current.get(fromUserId);
-        if (existingPc && existingPc.signalingState !== "stable" && existingPc.signalingState !== "have-local-offer") {
-          cleanupPeerConnection(fromUserId);
-        }
-
-        const pc = await getOrCreatePeerConnection(fromUserId);
-        
-        // Handle glare: if we also sent an offer, use polite-peer logic
-        if (pc.signalingState === "have-local-offer") {
-          // We are the polite peer if our userId is greater
-          const weArePolite = String(user?._id) > String(fromUserId);
-          if (weArePolite) {
-            console.log("Glare detected, rolling back local offer");
-            await pc.setLocalDescription({ type: "rollback" });
-          } else {
-            console.log("Glare detected, ignoring remote offer (we are impolite)");
-            return;
+        if (existingPc) {
+          const state = existingPc.signalingState;
+          if (state === "have-local-offer") {
+            // Glare: both sides sent offers. Since only the existing
+            // participant should send offers (call:participant_joined),
+            // this shouldn't happen often. If it does, the receiver
+            // (new joiner) always yields by tearing down and accepting.
+            console.log("Glare detected, tearing down local PC to accept remote offer");
+            cleanupPeerConnection(fromUserId);
+          } else if (state !== "stable") {
+            console.log("PC in unexpected state:", state, "— resetting");
+            cleanupPeerConnection(fromUserId);
           }
         }
+
+        // Ensure local media is ready before creating the peer connection
+        await ensureLocalMedia();
+        const pc = await getOrCreatePeerConnection(fromUserId);
 
         console.log("Setting remote description for offer from:", fromUserId);
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
@@ -584,7 +587,7 @@ export default function CollaborationRoom() {
 
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        console.log("Answer created for user:", fromUserId);
+        console.log("Answer created and sent for user:", fromUserId);
         sendWs({
           type: "call:answer",
           roomId: id,
