@@ -5,7 +5,26 @@ import { io } from "socket.io-client";
 
 const WS_BASE = import.meta.env.VITE_WS_URL || "ws://localhost:3000/ws/chat";
 const TODO_WS_BASE = import.meta.env.VITE_TODO_WS_URL || "http://localhost:3000";
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  {
+    urls: "turn:openrelay.metered.ca:80",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443?transport=tcp",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+];
 const BACKEND_TOKEN_KEY = "collabhub_backend_access_token";
 
 const formatTime = (value) => {
@@ -75,6 +94,8 @@ export default function CollaborationRoom() {
   const joinedCallRef = useRef(false);
   const reconnectTimerRef = useRef(null);
   const shouldReconnectRef = useRef(true);
+  const pendingIceCandidatesRef = useRef(new Map());
+  const remoteDescSetRef = useRef(new Map());
 
   const roomTitle = useMemo(() => {
     if (location.state?.projectTitle) {
@@ -305,6 +326,21 @@ export default function CollaborationRoom() {
     });
   };
 
+  const flushPendingIceCandidates = async (targetUserId, pc) => {
+    const pending = pendingIceCandidatesRef.current.get(String(targetUserId));
+    if (pending && pending.length > 0) {
+      console.log(`Flushing ${pending.length} pending ICE candidates for user:`, targetUserId);
+      for (const candidate of pending) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.warn("Error adding queued ICE candidate:", err);
+        }
+      }
+      pendingIceCandidatesRef.current.delete(String(targetUserId));
+    }
+  };
+
   const getOrCreatePeerConnection = async (targetUserId) => {
     let pc = peerConnectionsRef.current.get(targetUserId);
     if (pc) {
@@ -338,29 +374,47 @@ export default function CollaborationRoom() {
 
       pc.ontrack = (event) => {
         console.log("Remote track received from user:", targetUserId, event);
-        const streamTrack = event.streams?.[0] || new MediaStream([event.track]);
-        if (!streamTrack) {
-          console.warn("No stream available for remote track");
-          return;
+        const remoteStream = event.streams?.[0];
+        if (remoteStream) {
+          console.log("Adding remote stream:", remoteStream.id, "tracks:", remoteStream.getTracks().length);
+          setRemoteStreams((prev) => {
+            const next = prev.filter((entry) => String(entry.userId) !== String(targetUserId));
+            next.push({ userId: targetUserId, stream: remoteStream });
+            return next;
+          });
+        } else {
+          // No associated stream, build one from the track
+          console.log("No stream in event, creating MediaStream from track");
+          setRemoteStreams((prev) => {
+            const existing = prev.find((entry) => String(entry.userId) === String(targetUserId));
+            if (existing) {
+              existing.stream.addTrack(event.track);
+              return [...prev];
+            }
+            const newStream = new MediaStream([event.track]);
+            return [...prev, { userId: targetUserId, stream: newStream }];
+          });
         }
-        console.log("Adding remote stream:", streamTrack.id);
-        setRemoteStreams((prev) => {
-          const next = prev.filter((entry) => String(entry.userId) !== String(targetUserId));
-          next.push({ userId: targetUserId, stream: streamTrack });
-          console.log("Remote streams updated:", next);
-          return next;
-        });
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log("ICE connection state for user", targetUserId, ":", pc.iceConnectionState);
+        if (pc.iceConnectionState === "failed") {
+          console.log("ICE failed, attempting restart for user:", targetUserId);
+          pc.restartIce();
+        }
       };
 
       pc.onconnectionstatechange = () => {
         console.log("Connection state changed for user", targetUserId, ":", pc.connectionState);
-        if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+        if (["failed", "closed"].includes(pc.connectionState)) {
           console.log("Cleaning up peer connection for user:", targetUserId);
           cleanupPeerConnection(targetUserId);
         }
       };
 
       peerConnectionsRef.current.set(targetUserId, pc);
+      remoteDescSetRef.current.set(String(targetUserId), false);
       console.log("Peer connection created and stored for user:", targetUserId);
       return pc;
     } catch (error) {
@@ -449,6 +503,14 @@ export default function CollaborationRoom() {
       const participants = data.participants || [];
       setCallParticipants(participants);
       knownParticipantsRef.current = new Map(participants.map((p) => [String(p.userId), p]));
+
+      // Send offers to ALL existing participants in the call (except self)
+      for (const p of participants) {
+        if (String(p.userId) !== String(user?._id)) {
+          console.log("Sending offer to existing participant:", p.userId);
+          createOfferForUser(p.userId);
+        }
+      }
       return;
     }
 
@@ -492,9 +554,34 @@ export default function CollaborationRoom() {
       try {
         console.log("Received offer from user:", data.fromUserId);
         const fromUserId = data.fromUserId;
+
+        // If we already have a PC with a remote description set,
+        // tear it down to handle the new offer cleanly (renegotiation)
+        const existingPc = peerConnectionsRef.current.get(fromUserId);
+        if (existingPc && existingPc.signalingState !== "stable" && existingPc.signalingState !== "have-local-offer") {
+          cleanupPeerConnection(fromUserId);
+        }
+
         const pc = await getOrCreatePeerConnection(fromUserId);
+        
+        // Handle glare: if we also sent an offer, use polite-peer logic
+        if (pc.signalingState === "have-local-offer") {
+          // We are the polite peer if our userId is greater
+          const weArePolite = String(user?._id) > String(fromUserId);
+          if (weArePolite) {
+            console.log("Glare detected, rolling back local offer");
+            await pc.setLocalDescription({ type: "rollback" });
+          } else {
+            console.log("Glare detected, ignoring remote offer (we are impolite)");
+            return;
+          }
+        }
+
         console.log("Setting remote description for offer from:", fromUserId);
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        remoteDescSetRef.current.set(String(fromUserId), true);
+        await flushPendingIceCandidates(fromUserId, pc);
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         console.log("Answer created for user:", fromUserId);
@@ -520,8 +607,14 @@ export default function CollaborationRoom() {
           console.warn("No peer connection found for user:", fromUserId);
           return;
         }
+        if (pc.signalingState !== "have-local-offer") {
+          console.warn("Ignoring answer — signaling state is:", pc.signalingState);
+          return;
+        }
         console.log("Setting remote description for answer from:", fromUserId);
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        remoteDescSetRef.current.set(String(fromUserId), true);
+        await flushPendingIceCandidates(fromUserId, pc);
         console.log("Remote description set for user:", fromUserId);
       } catch (error) {
         console.error("Error handling call answer:", error);
@@ -532,13 +625,25 @@ export default function CollaborationRoom() {
 
     if (data.type === "call:ice-candidate") {
       try {
-        console.log("Received ICE candidate from user:", data.fromUserId);
         const fromUserId = data.fromUserId;
-        const pc = await getOrCreatePeerConnection(fromUserId);
-        if (data.candidate) {
+        if (!data.candidate) return;
+
+        const pc = peerConnectionsRef.current.get(fromUserId);
+        const isRemoteDescSet = remoteDescSetRef.current.get(String(fromUserId));
+
+        if (pc && pc.remoteDescription && isRemoteDescSet) {
+          // Remote description is set, safe to add directly
           const iceCandidate = new RTCIceCandidate(data.candidate);
           await pc.addIceCandidate(iceCandidate);
           console.log("ICE candidate added for user:", fromUserId);
+        } else {
+          // Queue the candidate — remote description isn't ready yet
+          console.log("Queuing ICE candidate for user:", fromUserId);
+          const key = String(fromUserId);
+          if (!pendingIceCandidatesRef.current.has(key)) {
+            pendingIceCandidatesRef.current.set(key, []);
+          }
+          pendingIceCandidatesRef.current.get(key).push(data.candidate);
         }
       } catch (error) {
         console.error("Error handling ICE candidate:", error);
@@ -1125,11 +1230,8 @@ export default function CollaborationRoom() {
           <section className="call-stage">
             <div className="remote-video">
               <div className="video-label">Teammate Video</div>
-              {remotePrimary ? (
-                <video ref={remotePrimaryRef} autoPlay playsInline className="video-feed" />
-              ) : (
-                <p>No remote video yet</p>
-              )}
+              <video ref={remotePrimaryRef} autoPlay playsInline className="video-feed" style={remotePrimary ? {} : { display: "none" }} />
+              {!remotePrimary && <p>No remote video yet</p>}
             </div>
 
             <div className="local-video">
