@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend_1
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      # Provide other env vars like MONGODB_URI, GROQ_API_KEY dynamically
+
+  frontend:
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+      args:
+        # Example defaults for local compose run
+        - VITE_API_BASE_URL=http://localhost:3000/api
+        - VITE_USE_BACKEND=true
+        - VITE_WS_URL=ws://localhost:3000/ws/chat
+        - VITE_TODO_WS_URL=http://localhost:3000
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
